@@ -1,256 +1,391 @@
 """Support for Nature Remo AC."""
-import logging
+from __future__ import annotations
 
-from homeassistant.core import callback
-from homeassistant.components.climate import ClimateEntity
-from homeassistant.components.climate.const import (
-    DEFAULT_MAX_TEMP,
-    DEFAULT_MIN_TEMP,
-    HVAC_MODE_AUTO,
-    HVAC_MODE_COOL,
-    HVAC_MODE_DRY,
-    HVAC_MODE_FAN_ONLY,
-    HVAC_MODE_HEAT,
-    HVAC_MODE_OFF,
-    SUPPORT_FAN_MODE,
-    SUPPORT_SWING_MODE,
-    SUPPORT_TARGET_TEMPERATURE,
+from dataclasses import dataclass
+import logging
+from typing import Any
+
+from homeassistant.components.climate import (
+    ClimateEntity,
+    ClimateEntityDescription,
+    ClimateEntityFeature,
+    HVACMode,
+    PRESET_ECO,
+    PRESET_NONE,
+    PRESET_COMFORT,
+    PRESET_BOOST,
 )
-from homeassistant.const import ATTR_TEMPERATURE, TEMP_CELSIUS
-from . import DOMAIN, CONF_COOL_TEMP, CONF_HEAT_TEMP, NatureRemoBase
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import (
+    ATTR_TEMPERATURE,
+    PRECISION_WHOLE,
+    PRECISION_HALVES,
+    UnitOfTemperature,
+)
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from . import DOMAIN
+from .const import (
+    CONF_COOL_TEMP,
+    CONF_HEAT_TEMP,
+    DEFAULT_COOL_TEMP,
+    DEFAULT_HEAT_TEMP,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-SUPPORT_FLAGS = SUPPORT_TARGET_TEMPERATURE | SUPPORT_FAN_MODE | SUPPORT_SWING_MODE
-
+# Map HA modes to Nature Remo modes
 MODE_HA_TO_REMO = {
-    HVAC_MODE_AUTO: "auto",
-    HVAC_MODE_FAN_ONLY: "blow",
-    HVAC_MODE_COOL: "cool",
-    HVAC_MODE_DRY: "dry",
-    HVAC_MODE_HEAT: "warm",
-    HVAC_MODE_OFF: "power-off",
+    HVACMode.AUTO: "auto",
+    HVACMode.COOL: "cool",
+    HVACMode.DRY: "dry",
+    HVACMode.FAN_ONLY: "blow",
+    HVACMode.HEAT: "warm",
+    HVACMode.OFF: "power-off",
 }
 
-MODE_REMO_TO_HA = {
-    "auto": HVAC_MODE_AUTO,
-    "blow": HVAC_MODE_FAN_ONLY,
-    "cool": HVAC_MODE_COOL,
-    "dry": HVAC_MODE_DRY,
-    "warm": HVAC_MODE_HEAT,
-    "power-off": HVAC_MODE_OFF,
+# Map Nature Remo modes to HA modes
+MODE_REMO_TO_HA = {v: k for k, v in MODE_HA_TO_REMO.items()}
+
+# Preset modes mapping
+PRESET_MODES = {
+    PRESET_NONE: "normal",
+    PRESET_ECO: "eco",
+    PRESET_COMFORT: "comfort",
+    PRESET_BOOST: "boost",
 }
 
+@dataclass
+class NatureRemoClimateEntityDescription(ClimateEntityDescription):
+    """Class describing Nature Remo climate entities."""
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
     """Set up the Nature Remo AC."""
-    if discovery_info is None:
-        return
-    _LOGGER.debug("Setting up climate platform.")
-    coordinator = hass.data[DOMAIN]["coordinator"]
-    api = hass.data[DOMAIN]["api"]
-    config = hass.data[DOMAIN]["config"]
-    appliances = coordinator.data["appliances"]
-    async_add_entities(
-        [
-            NatureRemoAC(coordinator, api, appliance, config)
-            for appliance in appliances.values()
-            if appliance["type"] == "AC"
-        ]
-    )
+    coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
+    api = hass.data[DOMAIN][entry.entry_id]["api"]
+    config = hass.data[DOMAIN][entry.entry_id]["config"]
+
+    entities = [
+        NatureRemoAC(
+            coordinator=coordinator,
+            api=api,
+            appliance=appliance,
+            config=config,
+        )
+        for appliance in coordinator.data["appliances"].values()
+        if appliance["type"] == "AC"
+    ]
+
+    async_add_entities(entities)
 
 
-class NatureRemoAC(NatureRemoBase, ClimateEntity):
-    """Implementation of a Nature Remo E sensor."""
+class NatureRemoAC(CoordinatorEntity, ClimateEntity):
+    """Implementation of a Nature Remo AC."""
 
-    def __init__(self, coordinator, api, appliance, config):
-        super().__init__(coordinator, appliance)
+    _attr_has_entity_name = True
+    _enable_turn_on_off_backwards_compatibility = False
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    
+    def __init__(
+        self,
+        coordinator,
+        api,
+        appliance: dict[str, Any],
+        config: dict[str, Any],
+    ) -> None:
+        """Initialize the climate device."""
+        super().__init__(coordinator)
         self._api = api
-        self._default_temp = {
-            HVAC_MODE_COOL: config[CONF_COOL_TEMP],
-            HVAC_MODE_HEAT: config[CONF_HEAT_TEMP],
+        self._appliance = appliance
+        self._attr_unique_id = f"{appliance['id']}_climate"
+        self._attr_name = appliance["nickname"]
+
+        # Set device info
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, appliance["device"]["id"])},
+            "name": appliance["nickname"],
+            "manufacturer": "Nature",
+            "model": appliance.get("model", {}).get("name", "Remo AC"),
+            "sw_version": appliance["device"].get("firmware_version"),
         }
+
+        # Default temperatures
+        self._default_temps = {
+            HVACMode.COOL: config.get(CONF_COOL_TEMP, DEFAULT_COOL_TEMP),
+            HVACMode.HEAT: config.get(CONF_HEAT_TEMP, DEFAULT_HEAT_TEMP),
+        }
+
+        # Get supported modes and features
         self._modes = appliance["aircon"]["range"]["modes"]
-        self._hvac_mode = None
-        self._current_temperature = None
+        self._last_mode = None
+        self._last_target_temp = {mode: None for mode in MODE_REMO_TO_HA.values()}
+
+        # Initialize states
+        self._current_mode = None
         self._target_temperature = None
-        self._remo_mode = None
-        self._fan_mode = None
-        self._swing_mode = None
-        self._last_target_temperature = {v: None for v in MODE_REMO_TO_HA}
-        self._update(appliance["settings"])
+        self._current_temperature = None
+        self._current_fan_mode = None
+        self._current_swing_mode = None
+        self._current_preset = PRESET_NONE
+
+        # Set supported features
+        self._attr_supported_features = (
+            ClimateEntityFeature.TARGET_TEMPERATURE
+            | ClimateEntityFeature.FAN_MODE
+            | ClimateEntityFeature.SWING_MODE
+            | ClimateEntityFeature.TURN_ON
+            | ClimateEntityFeature.TURN_OFF
+            | ClimateEntityFeature.PRESET_MODE
+        )
+
+        # Update initial state
+        self._update_state(appliance["settings"])
 
     @property
-    def supported_features(self):
-        """Return the list of supported features."""
-        return SUPPORT_FLAGS
+    def hvac_mode(self) -> HVACMode | None:
+        """Return current operation mode."""
+        return self._current_mode
 
     @property
-    def current_temperature(self):
-        """Return the current temperature."""
+    def hvac_modes(self) -> list[HVACMode]:
+        """Return available operation modes."""
+        modes = [HVACMode.OFF]  # Always include OFF
+        for mode in self._modes:
+            if mode in MODE_REMO_TO_HA:
+                modes.append(MODE_REMO_TO_HA[mode])
+        return modes
+
+    @property
+    def current_temperature(self) -> float | None:
+        """Return current temperature."""
         return self._current_temperature
 
     @property
-    def temperature_unit(self):
-        """Return the unit of measurement which this thermostat uses."""
-        return TEMP_CELSIUS
-
-    @property
-    def min_temp(self):
-        """Return the minimum temperature."""
-        temp_range = self._current_mode_temp_range()
-        if len(temp_range) == 0:
-            return 0
-        return min(temp_range)
-
-    @property
-    def max_temp(self):
-        """Return the maximum temperature."""
-        temp_range = self._current_mode_temp_range()
-        if len(temp_range) == 0:
-            return 0
-        return max(temp_range)
-
-    @property
-    def target_temperature(self):
-        """Return the temperature we try to reach."""
-        _LOGGER.debug("Current target temperature: %s", self._target_temperature)
+    def target_temperature(self) -> float | None:
+        """Return target temperature."""
         return self._target_temperature
 
     @property
-    def target_temperature_step(self):
-        """Return the supported step of target temperature."""
-        temp_range = self._current_mode_temp_range()
+    def target_temperature_step(self) -> float:
+        """Return supported temperature step."""
+        temp_range = self._get_temp_range()
         if len(temp_range) >= 2:
-            # determine step from the gap of first and second temperature
             step = round(temp_range[1] - temp_range[0], 1)
-            if step in [1.0, 0.5]:  # valid steps
+            if step in [0.5, 1.0]:
                 return step
-        return 1
+        return 1.0
 
     @property
-    def hvac_mode(self):
-        """Return hvac operation ie. heat, cool mode."""
-        return self._hvac_mode
+    def precision(self) -> float:
+        """Return temperature precision."""
+        return PRECISION_HALVES if self.target_temperature_step == 0.5 else PRECISION_WHOLE
 
     @property
-    def hvac_modes(self):
-        """Return the list of available operation modes."""
-        remo_modes = list(self._modes.keys())
-        ha_modes = list(map(lambda mode: MODE_REMO_TO_HA[mode], remo_modes))
-        ha_modes.append(HVAC_MODE_OFF)
-        return ha_modes
+    def fan_mode(self) -> str | None:
+        """Return fan mode."""
+        return self._current_fan_mode
 
     @property
-    def fan_mode(self):
-        """Return the fan setting."""
-        return self._fan_mode
+    def fan_modes(self) -> list[str] | None:
+        """Return available fan modes."""
+        if self._current_mode == HVACMode.OFF:
+            return None
+        return self._modes[MODE_HA_TO_REMO[self._current_mode]]["vol"]
 
     @property
-    def fan_modes(self):
-        """List of available fan modes."""
-        return self._modes[self._remo_mode]["vol"]
+    def swing_mode(self) -> str | None:
+        """Return swing mode."""
+        return self._current_swing_mode
 
     @property
-    def swing_mode(self):
-        """Return the swing setting."""
-        return self._swing_mode
+    def swing_modes(self) -> list[str] | None:
+        """Return available swing modes."""
+        if self._current_mode == HVACMode.OFF:
+            return None
+        return self._modes[MODE_HA_TO_REMO[self._current_mode]]["dir"]
 
     @property
-    def swing_modes(self):
-        """List of available swing modes."""
-        return self._modes[self._remo_mode]["dir"]
+    def preset_mode(self) -> str | None:
+        """Return current preset mode."""
+        return self._current_preset
 
     @property
-    def device_state_attributes(self):
-        """Return device specific state attributes."""
-        return {
-            "previous_target_temperature": self._last_target_temperature,
-        }
+    def preset_modes(self) -> list[str] | None:
+        """Return available preset modes."""
+        return list(PRESET_MODES.keys())
 
-    async def async_set_temperature(self, **kwargs):
+    @property
+    def min_temp(self) -> float:
+        """Return minimum temperature."""
+        temp_range = self._get_temp_range()
+        return min(temp_range) if temp_range else 16.0
+
+    @property
+    def max_temp(self) -> float:
+        """Return maximum temperature."""
+        temp_range = self._get_temp_range()
+        return max(temp_range) if temp_range else 30.0
+
+    async def async_set_temperature(self, **kwargs) -> None:
         """Set new target temperature."""
-        target_temp = kwargs.get(ATTR_TEMPERATURE)
-        if target_temp is None:
+        if (target_temp := kwargs.get(ATTR_TEMPERATURE)) is None:
             return
-        if target_temp.is_integer():
-            # has to cast to whole number otherwise API will return an error
-            target_temp = int(target_temp)
-        _LOGGER.debug("Set temperature: %d", target_temp)
-        await self._post({"temperature": f"{target_temp}"})
 
-    async def async_set_hvac_mode(self, hvac_mode):
-        """Set new target hvac mode."""
-        _LOGGER.debug("Set hvac mode: %s", hvac_mode)
-        mode = MODE_HA_TO_REMO[hvac_mode]
-        if mode == MODE_HA_TO_REMO[HVAC_MODE_OFF]:
-            await self._post({"button": mode})
-        else:
-            data = {"operation_mode": mode}
-            if self._last_target_temperature[mode]:
-                data["temperature"] = self._last_target_temperature[mode]
-            elif self._default_temp.get(hvac_mode):
-                data["temperature"] = self._default_temp[hvac_mode]
-            await self._post(data)
+        # Ensure temperature is within valid range
+        target_temp = min(max(target_temp, self.min_temp), self.max_temp)
 
-    async def async_set_fan_mode(self, fan_mode):
-        """Set new target fan mode."""
-        _LOGGER.debug("Set fan mode: %s", fan_mode)
-        await self._post({"air_volume": fan_mode})
+        # Round to supported precision
+        if self.precision == PRECISION_WHOLE:
+            target_temp = round(target_temp)
 
-    async def async_set_swing_mode(self, swing_mode):
-        """Set new target swing operation."""
-        _LOGGER.debug("Set swing mode: %s", swing_mode)
-        await self._post({"air_direction": swing_mode})
-
-    async def async_added_to_hass(self):
-        """Subscribe to updates."""
-        self.async_on_remove(
-            self._coordinator.async_add_listener(self._update_callback)
-        )
-
-    async def async_update(self):
-        """Update the entity.
-
-        Only used by the generic entity update service.
-        """
-        await self._coordinator.async_request_refresh()
-
-    def _update(self, ac_settings, device=None):
-        # hold this to determin the ac mode while it's turned-off
-        self._remo_mode = ac_settings["mode"]
         try:
-            self._target_temperature = float(ac_settings["temp"])
-            self._last_target_temperature[self._remo_mode] = ac_settings["temp"]
-        except:
-            self._target_temperature = None
+            await self._api.update_ac_settings(
+                self._appliance["id"],
+                {"temperature": str(target_temp)},
+            )
+            self._target_temperature = target_temp
+            self._last_target_temp[self._current_mode] = target_temp
+            self.async_write_ha_state()
+        except Exception as err:
+            _LOGGER.error("Failed to set temperature: %s", err)
 
-        if ac_settings["button"] == MODE_HA_TO_REMO[HVAC_MODE_OFF]:
-            self._hvac_mode = HVAC_MODE_OFF
-        else:
-            self._hvac_mode = MODE_REMO_TO_HA[self._remo_mode]
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        """Set operation mode."""
+        try:
+            if hvac_mode == HVACMode.OFF:
+                await self._api.update_ac_settings(
+                    self._appliance["id"],
+                    {"button": "power-off"},
+                )
+            else:
+                remo_mode = MODE_HA_TO_REMO[hvac_mode]
+                settings = {"operation_mode": remo_mode}
 
-        self._fan_mode = ac_settings["vol"] or None
-        self._swing_mode = ac_settings["dir"] or None
+                # Set previous or default temperature
+                if (prev_temp := self._last_target_temp.get(hvac_mode)) is not None:
+                    settings["temperature"] = str(prev_temp)
+                elif (default_temp := self._default_temps.get(hvac_mode)) is not None:
+                    settings["temperature"] = str(default_temp)
 
-        if device is not None:
-            self._current_temperature = float(device["newest_events"]["te"]["val"])
+                await self._api.update_ac_settings(
+                    self._appliance["id"],
+                    settings,
+                )
+            
+            self._current_mode = hvac_mode
+            self.async_write_ha_state()
+        except Exception as err:
+            _LOGGER.error("Failed to set operation mode: %s", err)
+
+    async def async_set_fan_mode(self, fan_mode: str) -> None:
+        """Set fan mode."""
+        try:
+            await self._api.update_ac_settings(
+                self._appliance["id"],
+                {"air_volume": fan_mode},
+            )
+            self._current_fan_mode = fan_mode
+            self.async_write_ha_state()
+        except Exception as err:
+            _LOGGER.error("Failed to set fan mode: %s", err)
+
+    async def async_set_swing_mode(self, swing_mode: str) -> None:
+        """Set swing mode."""
+        try:
+            await self._api.update_ac_settings(
+                self._appliance["id"],
+                {"air_direction": swing_mode},
+            )
+            self._current_swing_mode = swing_mode
+            self.async_write_ha_state()
+        except Exception as err:
+            _LOGGER.error("Failed to set swing mode: %s", err)
+
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        """Set preset mode."""
+        if preset_mode not in PRESET_MODES:
+            raise ValueError(f"Invalid preset mode: {preset_mode}")
+        
+        try:
+            await self._api.update_ac_settings(
+                self._appliance["id"],
+                {"button": PRESET_MODES[preset_mode]},
+            )
+            self._current_preset = preset_mode
+            self.async_write_ha_state()
+        except Exception as err:
+            _LOGGER.error("Failed to set preset mode: %s", err)
+
+    async def async_turn_on(self) -> None:
+        """Turn on the AC."""
+        # Restore last active mode or use default
+        mode = self._last_mode or HVACMode.COOL
+        await self.async_set_hvac_mode(mode)
+
+    async def async_turn_off(self) -> None:
+        """Turn off the AC."""
+        if self._current_mode != HVACMode.OFF:
+            self._last_mode = self._current_mode
+        await self.async_set_hvac_mode(HVACMode.OFF)
 
     @callback
-    def _update_callback(self):
-        self._update(
-            self._coordinator.data["appliances"][self._appliance_id]["settings"],
-            self._coordinator.data["devices"][self._device["id"]],
-        )
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        if self._appliance["id"] not in self.coordinator.data["appliances"]:
+            return
+
+        appliance = self.coordinator.data["appliances"][self._appliance["id"]]
+        self._update_state(appliance["settings"])
+        
+        # Update current temperature if available
+        if (device := self.coordinator.data["devices"].get(self._appliance["device"]["id"])):
+            try:
+                self._current_temperature = float(device["newest_events"]["te"]["val"])
+            except (KeyError, ValueError, TypeError):
+                self._current_temperature = None
+
         self.async_write_ha_state()
 
-    async def _post(self, data):
-        response = await self._api.post(
-            f"/appliances/{self._appliance_id}/aircon_settings", data
-        )
-        self._update(response)
-        self.async_write_ha_state()
+    def _update_state(self, settings: dict[str, Any]) -> None:
+        """Update internal state from settings."""
+        # Update operation mode
+        button = settings.get("button")
+        if button == "power-off":
+            self._current_mode = HVACMode.OFF
+        else:
+            remo_mode = settings.get("mode")
+            self._current_mode = MODE_REMO_TO_HA.get(remo_mode, self._current_mode)
 
-    def _current_mode_temp_range(self):
-        temp_range = self._modes[self._remo_mode]["temp"]
-        return list(map(float, filter(None, temp_range)))
+        # Update target temperature
+        try:
+            self._target_temperature = float(settings.get("temp", 0))
+            if self._current_mode != HVACMode.OFF:
+                self._last_target_temp[self._current_mode] = self._target_temperature
+        except (ValueError, TypeError):
+            self._target_temperature = None
+
+        # Update fan and swing modes
+        self._current_fan_mode = settings.get("vol")
+        self._current_swing_mode = settings.get("dir")
+
+        # Update preset mode (if applicable)
+        for preset, remo_preset in PRESET_MODES.items():
+            if button == remo_preset:
+                self._current_preset = preset
+                break
+
+    def _get_temp_range(self) -> list[float]:
+        """Get available temperature range for current mode."""
+        if self._current_mode == HVACMode.OFF:
+            return []
+        
+        remo_mode = MODE_HA_TO_REMO[self._current_mode]
+        temp_range = self._modes[remo_mode]["temp"]
+        return [float(temp) for temp in temp_range if temp is not None]
