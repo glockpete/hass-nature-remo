@@ -1,36 +1,65 @@
 """The Nature Remo integration."""
-import logging
-import voluptuous as vol
+from __future__ import annotations
 
 from datetime import timedelta
-from homeassistant.helpers import config_validation as cv, discovery
+import logging
+from typing import Any
+
+import async_timeout
+import voluptuous as vol
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import (
+    CONF_ACCESS_TOKEN,
+    Platform,
+    EVENT_HOMEASSISTANT_STOP,
+)
+from homeassistant.core import HomeAssistant, Event
+from homeassistant.exceptions import ConfigEntryNotReady, ConfigEntryAuthFailed
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
-from homeassistant.helpers.entity import Entity
-from homeassistant.const import CONF_ACCESS_TOKEN
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
+
+from .api import (
+    NatureRemoAPI,
+    NatureRemoAuthError,
+    NatureRemoConnectionError,
+    NatureRemoError,
+)
+from .const import (
+    DOMAIN,
+    CONF_COOL_TEMP,
+    CONF_HEAT_TEMP,
+    DEFAULT_COOL_TEMP,
+    DEFAULT_HEAT_TEMP,
+    DEFAULT_TIMEOUT,
+    DEFAULT_UPDATE_INTERVAL,
+    MANUFACTURER,
+    MODEL_MAP,
+)
 
 _LOGGER = logging.getLogger(__name__)
-_RESOURCE = "https://api.nature.global/1/"
 
-DOMAIN = "nature_remo"
-
-CONF_COOL_TEMP = "cool_temperature"
-CONF_HEAT_TEMP = "heat_temperature"
-DEFAULT_COOL_TEMP = 28
-DEFAULT_HEAT_TEMP = 20
-DEFAULT_UPDATE_INTERVAL = timedelta(seconds=60)
+PLATFORMS = [
+    Platform.CLIMATE,
+    Platform.SENSOR,
+    Platform.SWITCH,
+    Platform.LIGHT,
+    Platform.MEDIA_PLAYER,
+]
 
 CONFIG_SCHEMA = vol.Schema(
     {
         DOMAIN: vol.Schema(
             {
-                vol.Required(CONF_ACCESS_TOKEN): cv.string,
-                vol.Optional(CONF_COOL_TEMP, default=DEFAULT_COOL_TEMP): vol.Coerce(
-                    int
-                ),
-                vol.Optional(CONF_HEAT_TEMP, default=DEFAULT_HEAT_TEMP): vol.Coerce(
-                    int
-                ),
+                vol.Required(CONF_ACCESS_TOKEN): str,
+                vol.Optional(CONF_COOL_TEMP, default=DEFAULT_COOL_TEMP): vol.Coerce(int),
+                vol.Optional(CONF_HEAT_TEMP, default=DEFAULT_HEAT_TEMP): vol.Coerce(int),
             }
         )
     },
@@ -38,91 +67,208 @@ CONFIG_SCHEMA = vol.Schema(
 )
 
 
-async def async_setup(hass, config):
-    """Set up Nature Remo component."""
-    _LOGGER.debug("Setting up Nature Remo component.")
-    access_token = config[DOMAIN][CONF_ACCESS_TOKEN]
-    session = async_get_clientsession(hass)
-    api = NatureRemoAPI(access_token, session)
-    coordinator = hass.data[DOMAIN] = DataUpdateCoordinator(
-        hass,
-        _LOGGER,
-        name="Nature Remo update",
-        update_method=api.get,
-        update_interval=DEFAULT_UPDATE_INTERVAL,
-    )
-    await coordinator.async_refresh()
-    hass.data[DOMAIN] = {
-        "api": api,
-        "coordinator": coordinator,
-        "config": config[DOMAIN],
-    }
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up the Nature Remo domain."""
+    hass.data.setdefault(DOMAIN, {})
 
-    await discovery.async_load_platform(hass, "sensor", DOMAIN, {}, config)
-    await discovery.async_load_platform(hass, "climate", DOMAIN, {}, config)
+    if DOMAIN not in config:
+        return True
+
+    hass.async_create_task(
+        hass.config_entries.flow.async_init(
+            DOMAIN,
+            context={"source": SOURCE_IMPORT},
+            data=config[DOMAIN],
+        )
+    )
+
     return True
 
 
-class NatureRemoAPI:
-    """Nature Remo API client"""
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Set up Nature Remo from a config entry."""
+    session = async_get_clientsession(hass)
+    api = NatureRemoAPI(entry.data[CONF_ACCESS_TOKEN], session)
 
-    def __init__(self, access_token, session):
-        """Init API client"""
-        self._access_token = access_token
-        self._session = session
+    async def async_update_data() -> dict[str, Any]:
+        """Fetch data from API."""
+        try:
+            async with async_timeout.timeout(DEFAULT_TIMEOUT):
+                return await api.get_all_data()
+        except NatureRemoAuthError as err:
+            raise ConfigEntryAuthFailed from err
+        except NatureRemoConnectionError as err:
+            raise UpdateFailed(f"Error communicating with API: {err}")
+        except NatureRemoError as err:
+            raise UpdateFailed(f"Error fetching data: {err}")
 
-    async def get(self):
-        """Get appliance and device list"""
-        _LOGGER.debug("Trying to fetch appliance and device list from API.")
-        headers = {"Authorization": f"Bearer {self._access_token}"}
-        response = await self._session.get(f"{_RESOURCE}/appliances", headers=headers)
-        appliances = {x["id"]: x for x in await response.json()}
-        response = await self._session.get(f"{_RESOURCE}/devices", headers=headers)
-        devices = {x["id"]: x for x in await response.json()}
-        return {"appliances": appliances, "devices": devices}
+    coordinator = DataUpdateCoordinator(
+        hass,
+        _LOGGER,
+        name=f"{DOMAIN}_coordinator",
+        update_method=async_update_data,
+        update_interval=DEFAULT_UPDATE_INTERVAL,
+    )
 
-    async def post(self, path, data):
-        """Post any request"""
-        _LOGGER.debug("Trying to request post:%s, data:%s", path, data)
-        headers = {"Authorization": f"Bearer {self._access_token}"}
-        response = await self._session.post(
-            f"{_RESOURCE}{path}", data=data, headers=headers
-        )
-        return await response.json()
-
-
-class NatureRemoBase(Entity):
-    """Nature Remo entity base class."""
-
-    def __init__(self, coordinator, appliance):
-        self._coordinator = coordinator
-        self._name = f"Nature Remo {appliance['nickname']}"
-        self._appliance_id = appliance["id"]
-        self._device = appliance["device"]
-
-    @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._name
-
-    @property
-    def unique_id(self):
-        """Return a unique ID."""
-        return self._appliance_id
-
-    @property
-    def should_poll(self):
-        """Return the polling requirement of the entity."""
+    # Fetch initial data to check connection and validate setup
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except ConfigEntryAuthFailed:
+        _LOGGER.error("Invalid authentication")
         return False
+    except ConfigEntryNotReady:
+        raise
+
+    hass.data[DOMAIN][entry.entry_id] = {
+        "api": api,
+        "coordinator": coordinator,
+        "config": entry.data,
+        "unsub_stop": None,  # Will store the stop event listener
+    }
+
+    # Register devices
+    await _async_register_devices(hass, entry, coordinator.data)
+
+    # Set up platforms
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    # Set up event listener for cleanup
+    async def async_stop(event: Event) -> None:
+        """Handle cleanup when Home Assistant stops."""
+        await api.close_session()
+
+    hass.data[DOMAIN][entry.entry_id]["unsub_stop"] = hass.bus.async_listen_once(
+        EVENT_HOMEASSISTANT_STOP, async_stop
+    )
+
+    # Register update listener for config entry changes
+    entry.async_on_unload(entry.add_update_listener(update_listener))
+
+    return True
+
+
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+
+    if unload_ok:
+        # Clean up
+        data = hass.data[DOMAIN].pop(entry.entry_id)
+        # Remove stop event listener
+        if data["unsub_stop"] is not None:
+            data["unsub_stop"]()
+        # Close API session
+        await data["api"].close_session()
+
+    return unload_ok
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Migrate old entry."""
+    _LOGGER.debug("Migrating from version %s", entry.version)
+
+    if entry.version == 1:
+        new_data = {**entry.data}
+        
+        # Add new default values
+        new_data.setdefault(CONF_COOL_TEMP, DEFAULT_COOL_TEMP)
+        new_data.setdefault(CONF_HEAT_TEMP, DEFAULT_HEAT_TEMP)
+
+        entry.version = 2
+        hass.config_entries.async_update_entry(entry, data=new_data)
+
+    _LOGGER.info("Migration to version %s successful", entry.version)
+
+    return True
+
+
+async def async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Update options."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Handle options update."""
+    await hass.config_entries.async_reload(entry.entry_id)
+
+
+async def _async_register_devices(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    data: dict[str, Any],
+) -> None:
+    """Register devices with the device registry."""
+    device_registry = dr.async_get(hass)
+
+    # Register the Nature Remo hub device
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, "nature_remo_hub")},
+        manufacturer=MANUFACTURER,
+        name="Nature Remo Hub",
+        model="Hub",
+        sw_version=entry.data.get("hub_version"),
+    )
+
+    # Register all physical Nature Remo devices
+    for device in data["devices"].values():
+        device_registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, device["id"])},
+            manufacturer=MANUFACTURER,
+            name=device.get("name", "Nature Remo Device"),
+            model=MODEL_MAP.get(device.get("firmware_version", "")).get("name", "Unknown"),
+            sw_version=device.get("firmware_version"),
+            via_device=(DOMAIN, "nature_remo_hub"),
+        )
+
+    # Register IR-controlled appliances
+    for appliance in data["appliances"].values():
+        device_registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, appliance["id"])},
+            manufacturer=appliance.get("model", {}).get("manufacturer", "Unknown"),
+            name=appliance.get("nickname", "IR Device"),
+            model=appliance.get("model", {}).get("name", "Unknown"),
+            via_device=(DOMAIN, appliance["device"]["id"]),
+        )
+
+
+class NatureRemoEntity(CoordinatorEntity):
+    """Base class for Nature Remo entities."""
+
+    def __init__(
+        self,
+        coordinator: DataUpdateCoordinator,
+        device_id: str,
+        name: str,
+    ) -> None:
+        """Initialize the entity."""
+        super().__init__(coordinator)
+        self._device_id = device_id
+        self._attr_name = name
+        self._attr_unique_id = f"{device_id}_{self.__class__.__name__.lower()}"
+        self._attr_device_info = self._get_device_info()
+
+    def _get_device_info(self) -> dict[str, Any]:
+        """Get device info."""
+        device = self.coordinator.data["devices"].get(self._device_id, {})
+        return {
+            "identifiers": {(DOMAIN, self._device_id)},
+            "name": device.get("name", self._attr_name),
+            "manufacturer": MANUFACTURER,
+            "model": MODEL_MAP.get(device.get("firmware_version", "")).get("name", "Unknown"),
+            "sw_version": device.get("firmware_version"),
+            "via_device": (DOMAIN, "nature_remo_hub"),
+        }
 
     @property
-    def device_info(self):
-        """Return the device info for the sensor."""
-        # Since device registration requires Config Entries, this dosen't work for now
-        return {
-            "identifiers": {(DOMAIN, self._device["id"])},
-            "name": self._device["name"],
-            "manufacturer": "Nature Remo",
-            "model": self._device["serial_number"],
-            "sw_version": self._device["firmware_version"],
-        }
+    def available(self) -> bool:
+        """Return if entity is available."""
+        device = self.coordinator.data["devices"].get(self._device_id)
+        if device and "updated_at" in device:
+            last_update = datetime.fromisoformat(device["updated_at"].replace("Z", "+00:00"))
+            # Consider device unavailable if not updated in last hour
+            if (datetime.now() - last_update).total_seconds() > 3600:
+                return False
+        return super().available
