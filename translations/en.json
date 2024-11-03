@@ -1,1 +1,94 @@
-
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Nature Remo",
+                "description": "Enter your Nature Remo access token. You can get it from https://home.nature.global/",
+                "data": {
+                    "access_token": "Access Token",
+                    "cool_temperature": "Default Cool Temperature (°C)",
+                    "heat_temperature": "Default Heat Temperature (°C)"
+                }
+            }
+        },
+        "error": {
+            "invalid_auth": "Invalid access token. Please check your token and try again.",
+            "cannot_connect": "Failed to connect. Please check your internet connection and try again.",
+            "unknown": "Unexpected error occurred. Please check the logs for more details.",
+            "timeout": "Connection timed out. Please try again."
+        },
+        "abort": {
+            "already_configured": "This Nature Remo device is already configured"
+        }
+    },
+    "entity": {
+        "climate": {
+            "nature_remo": {
+                "state_attributes": {
+                    "fan_mode": {
+                        "auto": "Auto",
+                        "low": "Low",
+                        "medium": "Medium",
+                        "high": "High"
+                    },
+                    "swing_mode": {
+                        "off": "Off",
+                        "vertical": "Vertical",
+                        "horizontal": "Horizontal",
+                        "both": "Both"
+                    },
+                    "operation_mode": {
+                        "auto": "Auto",
+                        "cool": "Cool",
+                        "heat": "Heat",
+                        "dry": "Dry",
+                        "fan_only": "Fan Only",
+                        "off": "Off"
+                    }
+                }
+            }
+        },
+        "sensor": {
+            "nature_remo": {
+                "state_attributes": {
+                    "temperature": "Temperature",
+                    "humidity": "Humidity",
+                    "illuminance": "Illuminance",
+                    "power": "Power",
+                    "energy": "Energy"
+                }
+            }
+        },
+        "switch": {
+            "nature_remo": {
+                "state_attributes": {
+                    "power": "Power State"
+                }
+            }
+        }
+    },
+    "services": {
+        "update_ac_settings": {
+            "name": "Update AC Settings",
+            "description": "Updates the AC settings.",
+            "fields": {
+                "operation_mode": {
+                    "name": "Operation Mode",
+                    "description": "The operation mode to set (auto, cool, heat, dry, fan_only, off)"
+                },
+                "target_temperature": {
+                    "name": "Target Temperature",
+                    "description": "The target temperature to set"
+                },
+                "fan_mode": {
+                    "name": "Fan Mode",
+                    "description": "The fan mode to set (auto, low, medium, high)"
+                },
+                "swing_mode": {
+                    "name": "Swing Mode",
+                    "description": "The swing mode to set (off, vertical, horizontal, both)"
+                }
+            }
+        }
+    }
+}
