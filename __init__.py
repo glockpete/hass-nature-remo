@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import Any
 
 import async_timeout
 import voluptuous as vol
@@ -14,7 +15,11 @@ from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity import Entity
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 
 from .const import (
     DOMAIN,
@@ -29,6 +34,7 @@ from .const import (
     ERROR_AUTH,
     ERROR_CONNECTION,
     ERROR_TIMEOUT,
+    ERROR_RESPONSE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -53,6 +59,93 @@ CONFIG_SCHEMA = vol.Schema(
     },
     extra=vol.ALLOW_EXTRA,
 )
+
+
+class NatureRemoAPI:
+    """Nature Remo API wrapper."""
+
+    def __init__(self, token: str, session, base_url: str) -> None:
+        """Initialize the API."""
+        self._token = token
+        self._session = session
+        self._base_url = base_url
+        self._last_api_call = 0
+
+    @property
+    def _headers(self) -> dict:
+        """Return headers for API calls."""
+        return {"Authorization": f"Bearer {self._token}"}
+
+    async def get_all_data(self) -> dict[str, dict[str, Any]]:
+        """Get all devices and appliances data."""
+        try:
+            devices = await self._get_devices()
+            appliances = await self._get_appliances()
+            
+            return {
+                "devices": {device["id"]: device for device in devices},
+                "appliances": {app["id"]: app for app in appliances}
+            }
+        except Exception as err:
+            _LOGGER.error("Error fetching data from Nature Remo API: %s", err)
+            raise UpdateFailed(f"Error communicating with API: {err}") from err
+
+    async def _get_devices(self) -> list[dict[str, Any]]:
+        """Get devices from API."""
+        try:
+            async with async_timeout.timeout(DEFAULT_TIMEOUT):
+                async with self._session.get(
+                    f"{self._base_url}devices",
+                    headers=self._headers,
+                ) as response:
+                    if response.status == 401:
+                        raise Exception(ERROR_AUTH)
+                    if response.status != 200:
+                        raise Exception(ERROR_RESPONSE)
+                    return await response.json()
+        except async_timeout.TimeoutError as err:
+            raise Exception(ERROR_TIMEOUT) from err
+        except Exception as err:
+            raise Exception(ERROR_CONNECTION) from err
+
+    async def _get_appliances(self) -> list[dict[str, Any]]:
+        """Get appliances from API."""
+        try:
+            async with async_timeout.timeout(DEFAULT_TIMEOUT):
+                async with self._session.get(
+                    f"{self._base_url}appliances",
+                    headers=self._headers,
+                ) as response:
+                    if response.status == 401:
+                        raise Exception(ERROR_AUTH)
+                    if response.status != 200:
+                        raise Exception(ERROR_RESPONSE)
+                    return await response.json()
+        except async_timeout.TimeoutError as err:
+            raise Exception(ERROR_TIMEOUT) from err
+        except Exception as err:
+            raise Exception(ERROR_CONNECTION) from err
+
+    async def update_ac_settings(self, appliance_id: str, settings: dict[str, Any]) -> None:
+        """Update AC settings."""
+        params = {k: str(v) for k, v in settings.items()}
+        
+        try:
+            async with async_timeout.timeout(DEFAULT_TIMEOUT):
+                async with self._session.post(
+                    f"{self._base_url}appliances/{appliance_id}/aircon_settings",
+                    headers=self._headers,
+                    params=params,
+                ) as response:
+                    if response.status == 401:
+                        raise Exception(ERROR_AUTH)
+                    if response.status != 200:
+                        raise Exception(ERROR_RESPONSE)
+                    return await response.json()
+        except async_timeout.TimeoutError as err:
+            raise Exception(ERROR_TIMEOUT) from err
+        except Exception as err:
+            raise Exception(ERROR_CONNECTION) from err
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -83,15 +176,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         API_ENDPOINT
     )
 
-    async def async_update_data():
+    async def async_update_data() -> dict[str, Any]:
         """Fetch data from API."""
         try:
             async with async_timeout.timeout(DEFAULT_TIMEOUT):
-                data = await api.get_all_data()
-                return data
+                return await api.get_all_data()
         except Exception as err:
             _LOGGER.error("Error communicating with API: %s", err)
-            raise ConfigEntryNotReady from err
+            raise UpdateFailed(f"Error communicating with API: {err}") from err
 
     coordinator = DataUpdateCoordinator(
         hass,
@@ -140,7 +232,12 @@ class NatureRemoBase(Entity):
         return False
 
     @property
-    def device_info(self) -> dict:
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return self.coordinator.last_update_success
+
+    @property
+    def device_info(self) -> dict[str, Any]:
         """Return device information."""
         return {
             "identifiers": {(DOMAIN, self._device_id)},
@@ -160,7 +257,7 @@ class NatureRemoBase(Entity):
 class NatureRemoDeviceBase(NatureRemoBase):
     """Nature Remo device base entity class."""
 
-    def __init__(self, coordinator: DataUpdateCoordinator, device: dict) -> None:
+    def __init__(self, coordinator: DataUpdateCoordinator, device: dict[str, Any]) -> None:
         """Initialize the entity."""
         super().__init__(coordinator, device["id"])
         self._attr_name = f"Nature Remo {device['name']}"
@@ -174,5 +271,7 @@ class NatureRemoDeviceBase(NatureRemoBase):
     @property
     def available(self) -> bool:
         """Return if entity is available."""
-        device = self.coordinator.data["devices"].get(self._device["id"])
-        return device is not None
+        return (
+            super().available
+            and self._device_id in self.coordinator.data["devices"]
+        )
