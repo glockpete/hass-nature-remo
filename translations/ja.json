@@ -1,1 +1,94 @@
-
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Nature Remo",
+                "description": "Nature Remoのアクセストークンを入力してください。トークンは https://home.nature.global/ で取得できます。",
+                "data": {
+                    "access_token": "アクセストークン",
+                    "cool_temperature": "冷房デフォルト温度 (°C)",
+                    "heat_temperature": "暖房デフォルト温度 (°C)"
+                }
+            }
+        },
+        "error": {
+            "invalid_auth": "アクセストークンが無効です。トークンを確認して再度お試しください。",
+            "cannot_connect": "接続に失敗しました。インターネット接続を確認して再度お試しください。",
+            "unknown": "予期せぬエラーが発生しました。ログを確認してください。",
+            "timeout": "接続がタイムアウトしました。再度お試しください。"
+        },
+        "abort": {
+            "already_configured": "このNature Remoデバイスは既に設定されています"
+        }
+    },
+    "entity": {
+        "climate": {
+            "nature_remo": {
+                "state_attributes": {
+                    "fan_mode": {
+                        "auto": "自動",
+                        "low": "弱",
+                        "medium": "中",
+                        "high": "強"
+                    },
+                    "swing_mode": {
+                        "off": "オフ",
+                        "vertical": "上下",
+                        "horizontal": "左右",
+                        "both": "上下左右"
+                    },
+                    "operation_mode": {
+                        "auto": "自動",
+                        "cool": "冷房",
+                        "heat": "暖房",
+                        "dry": "除湿",
+                        "fan_only": "送風",
+                        "off": "オフ"
+                    }
+                }
+            }
+        },
+        "sensor": {
+            "nature_remo": {
+                "state_attributes": {
+                    "temperature": "温度",
+                    "humidity": "湿度",
+                    "illuminance": "照度",
+                    "power": "電力",
+                    "energy": "消費電力量"
+                }
+            }
+        },
+        "switch": {
+            "nature_remo": {
+                "state_attributes": {
+                    "power": "電源状態"
+                }
+            }
+        }
+    },
+    "services": {
+        "update_ac_settings": {
+            "name": "エアコン設定の更新",
+            "description": "エアコンの設定を更新します。",
+            "fields": {
+                "operation_mode": {
+                    "name": "運転モード",
+                    "description": "設定する運転モード（自動、冷房、暖房、除湿、送風、オフ）"
+                },
+                "target_temperature": {
+                    "name": "目標温度",
+                    "description": "設定する目標温度"
+                },
+                "fan_mode": {
+                    "name": "風量モード",
+                    "description": "設定する風量（自動、弱、中、強）"
+                },
+                "swing_mode": {
+                    "name": "風向モード",
+                    "description": "設定する風向（オフ、上下、左右、上下左右）"
+                }
+            }
+        }
+    }
+}
