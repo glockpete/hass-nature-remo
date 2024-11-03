@@ -10,13 +10,32 @@
         "Sensor",
         "Switch",
         "Light",
-        "Media Player"
+        "Media Player",
+        "Energy"
     ],
     "ha_domain": "nature_remo",
     "ha_quality_scale": "silver",
     "ha_integration_type": "hub",
+    "homekit": {
+        "models": [
+            "Remo",
+            "Remo 2",
+            "Remo E",
+            "Remo E lite",
+            "Remo mini"
+        ]
+    },
     "iot_class": "cloud_polling",
     "issue_tracker": "https://github.com/hannoeru/hass-nature-remo/issues",
-    "requirements": [],
-    "version": "2.1.0"
+    "requirements": [
+        "voluptuous>=0.12.1"
+    ],
+    "version": "2.1.0",
+    "zeroconf": [],
+    "bluetooth": [],
+    "translations_path": "translations",
+    "after_dependencies": [],
+    "integration_type": "hub",
+    "min_ha_version": "2024.1.0",
+    "loggers": ["nature_remo"]
 }
