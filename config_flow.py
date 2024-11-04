@@ -23,7 +23,6 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> bool:
     """Validate the user input allows us to connect."""
     session = async_get_clientsession(hass)
