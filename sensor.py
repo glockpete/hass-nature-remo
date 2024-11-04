@@ -1,3 +1,4 @@
+
 """Support for Nature Remo sensors."""
 from __future__ import annotations
 
@@ -20,9 +21,7 @@ from homeassistant.const import (
     LIGHT_LUX,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.typing import StateType
 
 from . import NatureRemoBase, NatureRemoDeviceBase
 from .const import (
@@ -40,11 +39,9 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-
 @dataclass
 class NatureRemoSensorEntityDescription(SensorEntityDescription):
     """Class describing Nature Remo sensor entities."""
-
     value_fn: Callable[[Any], StateType] | None = None
 
 
@@ -56,7 +53,7 @@ SENSOR_TYPES: tuple[NatureRemoSensorEntityDescription, ...] = (
         native_unit_of_measurement=POWER_WATT,
         device_class=SensorDeviceClass.POWER,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: data["smart_meter"]["echonetlite_properties"][ECHONET_INSTANT_POWER]["val"],
+        value_fn=lambda data: data.get("smart_meter", {}).get("echonetlite_properties", {}).get(ECHONET_INSTANT_POWER, {}).get("val", None),
     ),
     NatureRemoSensorEntityDescription(
         key="energy",
@@ -65,7 +62,7 @@ SENSOR_TYPES: tuple[NatureRemoSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.ENERGY,
         state_class=SensorStateClass.TOTAL_INCREASING,
         value_fn=lambda data: (
-            data["smart_meter"]["echonetlite_properties"][ECHONET_CUMULATIVE_POWER]["val"]
+            data.get("smart_meter", {}).get("echonetlite_properties", {}).get(ECHONET_CUMULATIVE_POWER, {}).get("val", 0)
             / ECHONET_COEFFICIENT
         ),
     ),
@@ -76,7 +73,7 @@ SENSOR_TYPES: tuple[NatureRemoSensorEntityDescription, ...] = (
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
         device_class=SensorDeviceClass.TEMPERATURE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda device: float(device["newest_events"]["te"]["val"]),
+        value_fn=lambda device: float(device.get("newest_events", {}).get("te", {}).get("val", None)),
     ),
     NatureRemoSensorEntityDescription(
         key=ATTR_HUMIDITY,
@@ -84,7 +81,7 @@ SENSOR_TYPES: tuple[NatureRemoSensorEntityDescription, ...] = (
         native_unit_of_measurement=PERCENTAGE,
         device_class=SensorDeviceClass.HUMIDITY,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda device: float(device["newest_events"]["hu"]["val"]),
+        value_fn=lambda device: float(device.get("newest_events", {}).get("hu", {}).get("val", None)),
     ),
     NatureRemoSensorEntityDescription(
         key=ATTR_ILLUMINANCE,
@@ -92,7 +89,7 @@ SENSOR_TYPES: tuple[NatureRemoSensorEntityDescription, ...] = (
         native_unit_of_measurement=LIGHT_LUX,
         device_class=SensorDeviceClass.ILLUMINANCE,
         state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda device: float(device["newest_events"]["il"]["val"]),
+        value_fn=lambda device: float(device.get("newest_events", {}).get("il", {}).get("val", None)),
     ),
 )
 
@@ -100,13 +97,13 @@ SENSOR_TYPES: tuple[NatureRemoSensorEntityDescription, ...] = (
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
-    """Set up Nature Remo sensors."""
+    """Set up Nature Remo sensors with error handling and validation."""
     coordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
     
     entities: list[SensorEntity] = []
 
     # Add energy meter sensors
-    for appliance in coordinator.data["appliances"].values():
+    for appliance in coordinator.data.get("appliances", {}).values():
         if appliance["type"] == TYPE_SMART_METER:
             for description in SENSOR_TYPES[:2]:  # Power and Energy sensors
                 if appliance["id"] in coordinator.data["appliances"]:
@@ -115,7 +112,7 @@ async def async_setup_entry(
                     )
 
     # Add environmental sensors
-    for device in coordinator.data["devices"].values():
+    for device in coordinator.data.get("devices", {}).values():
         device_model = device.get("firmware_version", "")
         supported_capabilities = SUPPORT_FLAGS.get(device_model, [])
 
@@ -157,7 +154,7 @@ class NatureRemoSensor(NatureRemoDeviceBase, SensorEntity):
         device: dict[str, Any],
         description: NatureRemoSensorEntityDescription,
     ) -> None:
-        """Initialize the sensor."""
+        """Initialize the sensor with unique ID and name."""
         super().__init__(coordinator, device)
         self.entity_description = description
         self._attr_unique_id = f"{device['id']}_{description.key}"
